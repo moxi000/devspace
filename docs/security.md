@@ -6,8 +6,9 @@ to your development machine.
 The security model is simple:
 
 - you choose a narrow filesystem allowlist
-- the MCP endpoint requires OAuth approval with your Owner password
-- Host headers are allowlisted from the configured public URL
+- the MCP endpoint requires OAuth approval with your Owner password, or a
+  dedicated local secret in OpenAI tunnel mode
+- Host headers are allowlisted from the local host and configured public URL
 - every coding action happens through explicit MCP tool calls
 
 ## Filesystem Allowlist
@@ -40,7 +41,7 @@ reach.
 ~/.devspace/auth.json
 ```
 
-When an MCP client connects, DevSpace shows an approval page. Enter the Owner
+For public HTTPS or ordinary local OAuth connections, DevSpace shows an approval page. Enter the Owner
 password only when you intentionally want that client to access this server.
 
 For env-driven deployments, set a long random value:
@@ -51,7 +52,7 @@ DEVSPACE_OAUTH_OWNER_TOKEN="$(openssl rand -base64 32)"
 
 ## Public URL And Host Allowlist
 
-DevSpace needs `server.publicBaseUrl` in `config.jsonc` so MCP clients can
+Public HTTPS deployments need `server.publicBaseUrl` in `config.jsonc` so MCP clients can
 discover OAuth metadata and connect to the correct resource.
 
 The value should be the origin only:
@@ -67,7 +68,26 @@ URL. Put `"*"` in `server.allowedHosts` only for intentional local debugging.
 
 ## Tunnels
 
-DevSpace does not manage tunnels. Your tunnel or reverse proxy should point to:
+For the official OpenAI option, `devspace serve` starts the installed
+`tunnel-client` and stops only that child when the server stops. You create and
+manage the remote tunnel and runtime API key in OpenAI Platform. DevSpace does
+not provision remote tunnels or install the client.
+
+OpenAI tunnel mode requires a loopback listener and `publicBaseUrl: null`.
+The ordinary runtime key authenticates the client to OpenAI; a separate generated
+secret authenticates the client to DevSpace through a static MCP request header.
+Both are stored in `auth.json` and can be overridden with
+`DEVSPACE_TUNNEL_API_KEY` and `DEVSPACE_TUNNEL_SECRET`. Secrets are passed to the
+child through its environment rather than command-line arguments. Keep that
+file and your local account private.
+
+ChatGPT uses **Tunnel** with **Authentication: None** in this mode. That setting
+skips DevSpace's browser OAuth flow; it does not make the local MCP endpoint
+unauthenticated. The OpenAI tunnel carries MCP traffic without publishing the
+server's web assets, so embedded tool cards are disabled at runtime. File and
+shell authority remain the same.
+
+For public HTTPS, you manage your own tunnel or reverse proxy. Point it to:
 
 ```text
 http://127.0.0.1:7676
@@ -84,7 +104,7 @@ package scripts.
 
 Filesystem path containment applies to DevSpace file tools. Shell commands run
 as local commands and can do what your user account can do. This is why the MCP
-client must be trusted and the Owner password must stay private.
+client must be trusted and the Owner password and tunnel credentials must stay private.
 
 ## Worktrees
 

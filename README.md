@@ -18,7 +18,7 @@
 
 **Give ChatGPT a secure connection to your own machine and Turn ChatGPT into Codex**
 
-DevSpace is a self-hosted MCP server that lets ChatGPT read, edit, search, and run code in your real local projects — your files, your tools, your terminal — without uploading anything to a third party. You run it on your machine, expose it through a tunnel you control, and approve the connection with a password only you have.
+DevSpace is a self-hosted MCP server that lets ChatGPT read, edit, search, and run code in your real local projects — your files, your tools, your terminal — without uploading anything to a third party. You run it on your machine and connect through an OpenAI secure MCP tunnel or a public HTTPS endpoint you control.
 
 The same `/mcp` endpoint serves the 2026-07-28 per-request protocol and automatically supports older 2025-era clients through stateless compatibility handling. There is no protocol mode to configure.
 
@@ -86,29 +86,24 @@ During setup, DevSpace asks for:
 - which Coding Agents DevSpace may use
 
 If you select ChatGPT, setup also asks which local project folders it may open
-and for your public HTTPS base URL from Cloudflare Tunnel, ngrok, Pinggy,
-Tailscale Funnel, or another reverse proxy. A Coding Agents-only setup asks
-neither question: local commands use the current Git project, or the current
-directory outside a repository.
+and how to connect: an official OpenAI secure MCP tunnel or a public HTTPS URL.
+A Coding Agents-only setup skips these questions and uses the current project.
 
-Use the public origin without `/mcp` during setup:
+For the OpenAI option, download the official
+[tunnel-client](https://github.com/openai/tunnel-client/releases), create a tunnel
+and a regular runtime API key in the
+[OpenAI Platform](https://platform.openai.com/settings/organization/tunnels),
+and provide the tunnel ID, binary path, and key during setup. DevSpace saves the
+key privately in `~/.devspace/auth.json`. `devspace serve` starts the local client
+and stops that client when the server stops; you manage the remote tunnel.
 
-```text
-https://your-tunnel-host.example.com
-```
+For public HTTPS, enter the origin without `/mcp`, then use its `/mcp` URL in
+your MCP client. Approve its OAuth connection with the Owner password printed
+during setup. Keep `~/.devspace/auth.json` private.
 
-You will configure your MCP client with the public `/mcp` URL after setup.
-Run `devspace serve` when using ChatGPT. For Coding Agents, setup prints a
-`skills` command and lets the Skills CLI handle installation.
-
-When the client connects, DevSpace opens an Owner password approval page. Enter
-the Owner password printed by `devspace init`. It is also stored in:
-
-```text
-~/.devspace/auth.json
-```
-
-Keep that password private.
+Existing installations can choose a different connection with `devspace init
+--force`. See the [setup guide](docs/setup.md) for both paths. For Coding Agents,
+setup prints a `skills` command and lets the Skills CLI handle installation.
 
 ## Connect Your MCP Client
 
@@ -118,7 +113,13 @@ The default local endpoint is:
 http://127.0.0.1:7676/mcp
 ```
 
-Most users should connect through a public HTTPS tunnel:
+For OpenAI tunnels, enable ChatGPT Developer Mode, create an app using **Tunnel**,
+select the configured tunnel, and choose **Authentication: None**. The local MCP
+endpoint still requires a separate secret supplied by the official client.
+Tunnel mode retains the coding tools but disables embedded tool cards at runtime,
+because the tunnel does not publish their web assets.
+
+For public HTTPS, connect using:
 
 ```text
 https://your-tunnel-host.example.com/mcp
@@ -158,11 +159,11 @@ connected client like a trusted coding partner with access to your machine.
 
 For a normal ChatGPT coding session:
 
-1. Start your tunnel.
-2. Run `devspace serve`.
-3. Connect the MCP client to your public `/mcp` URL.
-4. Approve the connection with the Owner password.
-5. Ask ChatGPT to open a project inside one of your allowed roots.
+1. Run `devspace serve`; it starts the configured OpenAI tunnel client. For public
+   HTTPS, start your own tunnel or reverse proxy too.
+2. Select the tunnel in ChatGPT, or connect to the public `/mcp` URL and approve
+   OAuth with the Owner password.
+3. Ask ChatGPT to open a project inside one of your allowed roots.
 
 ## Platform Support
 

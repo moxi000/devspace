@@ -5,7 +5,7 @@ comments and trailing commas and is validated before the server starts. Editor
 completion is provided by the versioned [JSON Schema](../schema/v1/devspace.schema.json),
 also hosted at the URL in the file's `$schema` property.
 
-Authentication stays separate because it contains a secret:
+Authentication stays separate because it contains secrets:
 
 ```text
 ~/.devspace/config.jsonc
@@ -27,6 +27,7 @@ Run `devspace init` to create both files. `devspace config set publicBaseUrl
     "port": 7676,
     // Use the public origin only; do not append /mcp.
     "publicBaseUrl": "https://devspace.example.com",
+    "openaiTunnel": null,
     "allowedHosts": [],
     "trustProxy": false,
   },
@@ -159,14 +160,55 @@ generated file into an open workspace. `artifacts.maxFileBytes` limits one
 streamed file. The secure publication path is currently available only on
 Linux; the tool is not registered on macOS, Windows, or BSD.
 
+## OpenAI secure MCP tunnel
+
+Initialization offers this connection alongside public HTTPS. To change an
+existing installation, run `devspace init --force`. The tunnel configuration is:
+
+```jsonc
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 7676,
+    "publicBaseUrl": null,
+    "openaiTunnel": {
+      "tunnelId": "tunnel_0123456789abcdef0123456789abcdef",
+      "binary": "tunnel-client",
+    },
+  },
+}
+```
+
+`binary` is an installed official client executable name or path. Download it
+from the [official releases](https://github.com/openai/tunnel-client/releases)
+before serving. `devspace serve` starts and stops its own client process; it
+does not create or delete remote tunnels. Tunnel mode requires a loopback host
+and no public base URL. Set `openaiTunnel` to `null` for public HTTPS or ordinary
+local OAuth operation.
+
+Initialization stores the ordinary runtime API key as `openaiTunnelApiKey` and
+a generated local authentication secret as `openaiTunnelSecret` in `auth.json`.
+These values do not belong in `config.jsonc`. The server gives the client the
+runtime key through `CONTROL_PLANE_API_KEY` and the local secret through
+`DEVSPACE_TUNNEL_SECRET`; the client sends the latter as a static MCP header.
+Choose **Tunnel** and **Authentication: None** in ChatGPT. This does not remove
+the local endpoint's secret authentication.
+
+The tunnel carries MCP requests, not public web assets. DevSpace therefore
+disables embedded UI at runtime while retaining the configured coding tools.
+It preserves `ui.enabled` in the configuration so a later HTTPS setup can use it.
+
 ## Environment boundary
 
-Only two user-facing DevSpace environment variables remain:
+User-facing DevSpace environment variables are limited to configuration location
+and secret overrides:
 
 | Variable | Purpose |
 | --- | --- |
 | `DEVSPACE_CONFIG_DIR` | Bootstrap location for `config.jsonc`, `auth.json`, skills, and profiles. |
 | `DEVSPACE_OAUTH_OWNER_TOKEN` | Optional secret override for the owner token stored in `auth.json`. |
+| `DEVSPACE_TUNNEL_API_KEY` | Overrides `auth.json`'s `openaiTunnelApiKey` for an OpenAI tunnel. Use a regular runtime key, not an admin key. |
+| `DEVSPACE_TUNNEL_SECRET` | Overrides `auth.json`'s `openaiTunnelSecret` for local tunnel-to-MCP authentication. |
 
 Durable environment settings were removed in v1.1. Move existing deployment
 values to these JSONC keys:

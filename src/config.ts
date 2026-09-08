@@ -12,6 +12,7 @@ export interface ServerConfig {
   configDir: string;
   host: string;
   port: number;
+  openaiTunnel?: { tunnelId: string; binary: string; apiKey: string; secret: string } | null;
   oauth: OAuthConfig;
   allowedRoots: string[];
   allowedHosts: string[];
@@ -36,6 +37,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
   const stored = files.config;
   const host = stored.server.host;
   const port = stored.server.port;
+  const tunnel = stored.server.openaiTunnel;
+  if (tunnel && !["127.0.0.1", "::1", "localhost"].includes(host)) {
+    throw new Error("OpenAI tunnel requires server.host to be a loopback address (127.0.0.1, ::1, or localhost).");
+  }
+  if (tunnel && stored.server.publicBaseUrl !== null) {
+    throw new Error("OpenAI tunnel requires server.publicBaseUrl to be null.");
+  }
+  const openaiTunnel = tunnel ? {
+    ...tunnel,
+    apiKey: parseTunnelSecret(env.DEVSPACE_TUNNEL_API_KEY ?? files.auth.openaiTunnelApiKey, "DEVSPACE_TUNNEL_API_KEY"),
+    secret: parseTunnelSecret(env.DEVSPACE_TUNNEL_SECRET ?? files.auth.openaiTunnelSecret, "DEVSPACE_TUNNEL_SECRET"),
+  } : null;
   const publicBaseUrl = parsePublicBaseUrl(
     stored.server.publicBaseUrl ?? localPublicBaseUrl(host, port),
   );
@@ -52,8 +65,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
     configDir: files.dir,
     host,
     port,
+    openaiTunnel,
     oauth: {
-      ownerToken: parseRequiredSecret(
+      ownerToken: tunnel ? "" : parseRequiredSecret(
         env.DEVSPACE_OAUTH_OWNER_TOKEN ?? files.auth.ownerToken,
       ),
       accessTokenTtlSeconds: stored.oauth.accessTokenTtlSeconds,
@@ -61,11 +75,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ServerConfig {
       scopes: stored.oauth.scopes,
       allowedRedirectHosts: stored.oauth.allowedRedirectHosts,
     },
-    allowedRoots: normalizePaths(stored.workspaces.allowedRoots, [process.cwd()]),
+    allowedRoots: normalizePaths(stored.workspaces.allowedRoots),
     allowedHosts: normalizeAllowedHosts(derivedAllowedHosts),
     publicBaseUrl,
     toolMode: stored.tools.mode,
-    uiEnabled: stored.ui.enabled,
+    uiEnabled: !tunnel && stored.ui.enabled,
     stateDir: normalizePath(stored.storage.stateDir),
     worktreeRoot: normalizePath(stored.workspaces.worktreeRoot),
     artifactsEnabled: stored.artifacts.enabled,
@@ -104,6 +118,12 @@ function parseRequiredSecret(value: string | undefined): string {
   if (secret.length < 16) {
     throw new Error("OAuth owner token must be at least 16 characters long.");
   }
+  return secret;
+}
+
+function parseTunnelSecret(value: string | undefined, name: string): string {
+  const secret = value?.trim();
+  if (!secret) throw new Error(`${name} is required for the OpenAI tunnel. Run: devspace init`);
   return secret;
 }
 

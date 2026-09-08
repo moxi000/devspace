@@ -7,6 +7,8 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { promisify } from "node:util";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { setDevspaceConfigValue } from "./user-config.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { loadConfig, type ServerConfig, type ToolMode } from "./config.js";
 import type { LocalAgentProviderAvailability } from "./local-agent-availability.js";
@@ -314,6 +316,61 @@ test("open_workspace scopes checkout reuse to OpenAI session metadata", async (t
   assert.notEqual(structuredContent(unscoped).workspaceId, structuredContent(first).workspaceId);
   assert.ok(Array.isArray(structuredContent(otherSession).agentsFiles));
   assert.ok(Array.isArray(structuredContent(unscoped).agentsFiles));
+});
+
+test("OpenAI tunnel requires its local secret and serves MCP without OAuth", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "devspace-tunnel-http-test-"));
+  const config = loadConfig({
+    ...writeTestDevspaceConfig(join(root, ".config"), {
+      server: { openaiTunnel: { tunnelId: "tunnel_test", binary: "tunnel-client" } },
+      storage: { stateDir: join(root, ".state") },
+      workspaces: { allowedRoots: [root] },
+      logging: { level: "silent" },
+    }),
+    DEVSPACE_TUNNEL_API_KEY: "test-api-key",
+    DEVSPACE_TUNNEL_SECRET: "test-local-secret",
+  });
+  const running = createServer(config, { incomingArtifactAdapters: [] });
+  const httpServer = running.app.listen(0, "127.0.0.1");
+  await new Promise<void>((resolve) => httpServer.once("listening", resolve));
+  t.after(async () => {
+    await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
+    await running.close();
+    await rm(root, { recursive: true, force: true });
+  });
+  const address = httpServer.address();
+  assert.ok(address && typeof address === "object");
+  const url = `http://127.0.0.1:${address.port}`;
+  for (const secret of [undefined, "wrong-secret", "test-local-secret"]) {
+    const response = await fetch(`${url}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: "Bearer test-api-key",
+        ...(secret ? { "X-DevSpace-Tunnel-Secret": secret } : {}),
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {
+        protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "tunnel-test", version: "1" },
+      } }),
+    });
+    assert.equal(response.status, secret === "test-local-secret" ? 200 : 401, await response.text());
+  }
+  assert.equal((await fetch(`${url}/.well-known/oauth-authorization-server`)).status, 404);
+  const client = new Client({ name: "project-access-test", version: "1" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`${url}/mcp`), {
+    requestInit: { headers: { "X-DevSpace-Tunnel-Secret": "test-local-secret" } },
+  }));
+  t.after(() => client.close());
+  await writeFile(join(root, "access.txt"), "project access\n");
+  const opened = structuredContent(await callOpen(client, root));
+  const read = () => client.callTool({ name: "read", arguments: { workspaceId: opened.workspaceId, path: "access.txt" } });
+  assert.notEqual((await read()).isError, true);
+  setDevspaceConfigValue(["workspaces", "allowedRoots"], [], { DEVSPACE_CONFIG_DIR: config.configDir });
+  assert.equal((await read()).isError, true, "cached workspace must lose access on the next MCP request");
+  assert.equal((await callOpen(client, root)).isError, true, "empty list must not allow opening a workspace");
+  setDevspaceConfigValue(["workspaces", "allowedRoots"], [root], { DEVSPACE_CONFIG_DIR: config.configDir });
+  assert.notEqual((await read()).isError, true, "adding the project restores access without restarting");
 });
 
 test("HTTP endpoint serves modern MCP and stateless legacy clients", async (t) => {

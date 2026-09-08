@@ -8,6 +8,7 @@ import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import { satisfies } from "semver";
 import { loadConfig } from "./config.js";
 import { resolveCliWorkspaceContext } from "./cli-workspace.js";
+import { runProjectsCommand } from "./cli-projects.js";
 import {
   getLocalAgentProviderAvailabilitySnapshot,
 } from "./local-agent-availability.js";
@@ -35,9 +36,8 @@ import {
   presentAgentTargetCatalog,
 } from "./local-agent-presentation.js";
 import {
-  type OnboardingDestination,
+  type OnboardingUsage,
   SUBAGENT_SKILL_INSTALL_COMMAND,
-  resolveOnboardingUsage,
   updateOnboardingSubagentsConfig,
   usesChatGpt,
   usesCodingAgents,
@@ -52,12 +52,15 @@ import {
 import { expandHomePath } from "./roots.js";
 import { readReviewRef } from "./review-checkpoints.js";
 import { shutdownHttpServer } from "./server-shutdown.js";
+import { startOpenAiTunnel, stopOpenAiTunnel } from "./openai-tunnel.js";
+import type { ChildProcess } from "node:child_process";
 
 type Command =
   | "serve"
   | "init"
   | "doctor"
   | "config"
+  | "projects"
   | "agents"
   | "show-changes"
   | "help"
@@ -85,6 +88,9 @@ async function main(argv: string[]): Promise<void> {
     case "config":
       runConfigCommand(args);
       return;
+    case "projects":
+      runProjectsCommand(args);
+      return;
     case "agents":
       await runAgentsCommand(args);
       return;
@@ -106,6 +112,7 @@ function normalizeCommand(command: string | undefined): Command {
     command === "init"
     || command === "doctor"
     || command === "config"
+    || command === "projects"
     || command === "agents"
     || command === "show-changes"
   ) return command;
@@ -149,12 +156,12 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
   try {
     prompts.intro("DevSpace setup");
 
-    const destinationAnswer = await prompts.multiselect({
+    const destinationAnswer = await prompts.select<OnboardingUsage>({
       message: "Where will you use DevSpace?",
       options: [
         {
           value: "chatgpt",
-          label: "ChatGPT",
+          label: "ChatGPT Web",
           hint: "Connect ChatGPT to projects on this computer.",
         },
         {
@@ -162,12 +169,16 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
           label: "Coding Agents",
           hint: "Use DevSpace from Codex, Claude Code, OpenCode, Pi, and similar tools.",
         },
+        {
+          value: "both",
+          label: "Both",
+          hint: "Set up ChatGPT Web and coding agents.",
+        },
       ],
-      initialValues: files.config.server.publicBaseUrl ? ["chatgpt"] : ["coding-agents"],
-      required: true,
+      initialValue: files.config.server.publicBaseUrl || files.config.server.openaiTunnel ? "chatgpt" : "coding-agents",
     });
     if (prompts.isCancel(destinationAnswer)) throw new SetupCancelledError();
-    const usage = resolveOnboardingUsage(destinationAnswer as OnboardingDestination[]);
+    const usage = destinationAnswer;
     const useChatGpt = usesChatGpt(usage);
     const useCodingAgents = usesCodingAgents(usage);
 
@@ -189,24 +200,66 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
     const port = files.config.server.port;
 
     let publicBaseUrl: string | null = null;
+    let openaiTunnel: { tunnelId: string; binary: string } | null = null;
+    let tunnelApiKey = files.auth.openaiTunnelApiKey;
     if (useChatGpt) {
-      prompts.note(
-        [
-          `Point your HTTPS tunnel or reverse proxy to http://127.0.0.1:${port}.`,
-          "Paste its public URL below.",
-          "",
-          "Example: https://your-tunnel-host.example.com",
-        ].join("\n"),
-        "Connect ChatGPT",
-      );
-      publicBaseUrl = normalizePublicBaseUrl(await textPrompt({
-        message: files.config.server.publicBaseUrl
-          ? `What public URL will ChatGPT connect to? Press Enter to keep ${files.config.server.publicBaseUrl}`
-          : "What public URL will ChatGPT connect to?",
-        placeholder: files.config.server.publicBaseUrl ?? "https://your-tunnel-host.example.com",
-        defaultValue: files.config.server.publicBaseUrl ?? "",
-        validate: validateRequiredPublicBaseUrl,
-      }));
+      const connection = await prompts.select({
+        message: "How should ChatGPT connect?",
+        options: [
+          { value: "openai", label: "OpenAI Secure MCP Tunnel", hint: "Private connection through OpenAI; requires a tunnel and runtime API key." },
+          { value: "public", label: "Public HTTPS URL", hint: "Your own tunnel or reverse proxy." },
+        ],
+        initialValue: files.config.server.publicBaseUrl ? "public" : "openai",
+      });
+      if (prompts.isCancel(connection)) throw new SetupCancelledError();
+      if (connection === "openai") {
+        prompts.note([
+          "Create a tunnel at https://platform.openai.com/settings/organization/tunnels",
+          "Associate it with your ChatGPT workspace and grant your runtime API key Tunnels Read + Use.",
+          "Download the official tunnel-client for your platform:",
+          "https://github.com/openai/tunnel-client/releases/latest",
+          "DevSpace will run that client with the server. No public HTTPS URL is needed.",
+        ].join("\n"), "OpenAI tunnel");
+        const tunnelId = await textPrompt({
+          message: "What is your OpenAI tunnel ID?",
+          defaultValue: files.config.server.openaiTunnel?.tunnelId ?? "",
+          placeholder: "tunnel_...",
+          validate: (value) => /^tunnel_[a-zA-Z0-9_-]+$/.test(value ?? "") ? undefined : "Enter the tunnel_... ID from OpenAI Platform.",
+        });
+        const binary = await textPrompt({
+          message: "Official tunnel-client executable (name on PATH or full path)",
+          defaultValue: files.config.server.openaiTunnel?.binary ?? "tunnel-client",
+          placeholder: "tunnel-client",
+        });
+        openaiTunnel = { tunnelId, binary: binary.includes("/") || binary.includes("\\") ? resolve(expandHomePath(binary)) : binary };
+        if (!process.env.DEVSPACE_TUNNEL_API_KEY?.trim()) {
+          const answer = await prompts.password({
+            message: tunnelApiKey ? "OpenAI runtime API key (Enter to keep the saved key)" : "OpenAI runtime API key",
+            validate: (value) => value?.trim() || tunnelApiKey ? undefined : "Enter a runtime API key, or set DEVSPACE_TUNNEL_API_KEY before setup.",
+          });
+          if (prompts.isCancel(answer)) throw new SetupCancelledError();
+          tunnelApiKey = answer.trim() || tunnelApiKey;
+        }
+        prompts.note("The server will listen on 127.0.0.1. MCP widgets are unavailable over this private connection because their assets require a public URL.", "Private MCP connection");
+      } else {
+        prompts.note(
+          [
+            `Point your HTTPS tunnel or reverse proxy to http://127.0.0.1:${port}.`,
+            "Paste its public URL below.",
+            "",
+            "Example: https://your-tunnel-host.example.com",
+          ].join("\n"),
+          "Connect ChatGPT",
+        );
+        publicBaseUrl = normalizePublicBaseUrl(await textPrompt({
+          message: files.config.server.publicBaseUrl
+            ? `What public URL will ChatGPT connect to? Press Enter to keep ${files.config.server.publicBaseUrl}`
+            : "What public URL will ChatGPT connect to?",
+          placeholder: files.config.server.publicBaseUrl ?? "https://your-tunnel-host.example.com",
+          defaultValue: files.config.server.publicBaseUrl ?? "",
+          validate: validateRequiredPublicBaseUrl,
+        }));
+      }
     }
 
     const currentSubagents = files.config.subagents;
@@ -239,13 +292,22 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
     );
 
     const auth = {
+      ...files.auth,
       ownerToken: files.auth.ownerToken ?? generateOwnerToken(),
+      ...(openaiTunnel ? {
+        openaiTunnelApiKey: tunnelApiKey,
+        openaiTunnelSecret: files.auth.openaiTunnelSecret ?? generateOwnerToken(),
+      } : {}),
     };
 
     setDevspaceConfigValues([
       { path: ["server", "port"], value: port },
       ...(useChatGpt
-        ? [{ path: ["server", "publicBaseUrl"], value: publicBaseUrl }]
+        ? [
+          { path: ["server", "publicBaseUrl"], value: publicBaseUrl },
+          { path: ["server", "openaiTunnel"], value: openaiTunnel },
+          ...(openaiTunnel ? [{ path: ["server", "host"], value: "127.0.0.1" }] : []),
+        ]
         : []),
       ...(allowedRoots
         ? [{ path: ["workspaces", "allowedRoots"], value: allowedRoots }]
@@ -258,9 +320,10 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
       ...(allowedRoots ? [`Project folders: ${allowedRoots.join(", ")}`] : []),
       `Coding Agents: ${selectedProviders.join(", ")}`,
       ...(publicBaseUrl ? [`ChatGPT connection URL: ${publicBaseUrl}/mcp`] : []),
+      ...(openaiTunnel ? [`ChatGPT connection: Tunnel (${openaiTunnel.tunnelId}), Authentication: None`] : []),
     ];
     prompts.note(lines.join("\n"), "DevSpace is ready");
-    if (useChatGpt) {
+    if (useChatGpt && !openaiTunnel) {
       prompts.note(
         [
           `Owner password: ${auth.ownerToken}`,
@@ -268,6 +331,14 @@ async function runInit({ force }: { force: boolean }): Promise<void> {
         ].join("\n"),
         "Owner password",
       );
+    }
+    if (openaiTunnel) {
+      prompts.note([
+        "Run `devspace serve` and keep it running.",
+        "In ChatGPT developer mode, create an app with Connection: Tunnel.",
+        `Select ${openaiTunnel.tunnelId} and Authentication: None.`,
+        "The official client authenticates to OpenAI; a separate local secret protects DevSpace.",
+      ].join("\n"), "Connect ChatGPT");
     }
     if (useCodingAgents) {
       prompts.note(
@@ -310,25 +381,15 @@ async function serve(): Promise<void> {
   const { createServer } = await import("./server.js");
   const config = loadConfig();
   const { app, close, localAgentProviders } = createServer(config);
-  const httpServer = app.listen(config.port, config.host, () => {
-    console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
-    console.log(`public base url: ${config.publicBaseUrl}`);
-    console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
-    console.log(`allowed hosts: ${config.allowedHosts.join(", ")}`);
-    if (config.allowedHosts.includes("*")) {
-      console.warn("warning: Host header allowlist is disabled because server.allowedHosts contains '*'");
-    }
-    console.log("auth: Owner password approval required");
-    console.log(`logging: ${config.logging.level} ${config.logging.format}`);
-    console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
-  });
-
+  const httpServer = app.listen(config.port, config.host);
+  let tunnel: ChildProcess | undefined;
   let shuttingDown = false;
-  const shutdown = async () => {
+  const shutdown = async (exitCode = 0) => {
     if (shuttingDown) return;
     shuttingDown = true;
+    if (tunnel) stopOpenAiTunnel(tunnel);
     await shutdownHttpServer(httpServer, close);
-    process.exit(0);
+    process.exit(exitCode);
   };
   const handleShutdown = () => {
     void shutdown().catch((error) => {
@@ -338,6 +399,48 @@ async function serve(): Promise<void> {
   };
   process.once("SIGINT", handleShutdown);
   process.once("SIGTERM", handleShutdown);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      httpServer.once("listening", resolve);
+      httpServer.once("error", reject);
+    });
+    console.log(`devspace listening on http://${config.host}:${config.port}/mcp`);
+    if (!config.openaiTunnel) console.log(`public base url: ${config.publicBaseUrl}`);
+    console.log(`allowed roots: ${config.allowedRoots.join(", ")}`);
+    console.log(`allowed hosts: ${config.allowedHosts.join(", ")}`);
+    if (config.allowedHosts.includes("*")) {
+      console.warn("warning: Host header allowlist is disabled because server.allowedHosts contains '*'");
+    }
+    console.log(config.openaiTunnel ? "auth: private tunnel secret required" : "auth: Owner password approval required");
+    console.log(`logging: ${config.logging.level} ${config.logging.format}`);
+    console.log(`subagent providers: ${formatLocalAgentProviderStatusSummary(localAgentProviders)}`);
+    if (config.openaiTunnel) {
+      tunnel = await startOpenAiTunnel(config);
+      const tunnelFailed = (message: string) => {
+        if (shuttingDown) return;
+        console.error(message);
+        void shutdown(1).catch((error) => {
+          console.error("devspace shutdown failed", error);
+          process.exit(1);
+        });
+      };
+      tunnel.once("error", (error) => tunnelFailed(`OpenAI tunnel client error: ${error.message}`));
+      tunnel.once("exit", (code, signal) => tunnelFailed(`OpenAI tunnel client exited (code: ${code}, signal: ${signal}).`));
+      console.log(`OpenAI tunnel client started for ${config.openaiTunnel.tunnelId}; check its output for connection readiness.`);
+      console.log("ChatGPT: Connection = Tunnel, Authentication = None. MCP widgets are disabled on this private connection.");
+    }
+  } catch (error) {
+    shuttingDown = true;
+    if (tunnel) stopOpenAiTunnel(tunnel);
+    if (httpServer.listening) await shutdownHttpServer(httpServer, close);
+    else await close();
+    process.removeListener("SIGINT", handleShutdown);
+    process.removeListener("SIGTERM", handleShutdown);
+    if (config.openaiTunnel && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error("Official tunnel-client was not found. Download it from https://github.com/openai/tunnel-client/releases/latest and update the executable with `devspace init --force`.", { cause: error });
+    }
+    throw error;
+  }
 }
 
 async function runDoctor(): Promise<void> {
@@ -355,7 +458,14 @@ async function runDoctor(): Promise<void> {
   try {
     const config = loadConfig();
     console.log(`Local MCP URL: http://${config.host}:${config.port}/mcp`);
-    console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
+    if (config.openaiTunnel) {
+      console.log(`OpenAI tunnel: ${config.openaiTunnel.tunnelId}`);
+      console.log(`Tunnel client: ${config.openaiTunnel.binary}`);
+      console.log("Tunnel status: not probed; run `devspace serve` and inspect the official client's readiness output.");
+      console.log("ChatGPT authentication: None (local tunnel secret required); MCP widgets: disabled");
+    } else {
+      console.log(`Public MCP URL: ${new URL("/mcp", config.publicBaseUrl).toString()}`);
+    }
     console.log(`Allowed roots: ${config.allowedRoots.join(", ")}`);
     console.log(`Allowed hosts: ${config.allowedHosts.join(", ")}`);
     const providers = buildLocalAgentProviderStatuses(
@@ -389,6 +499,9 @@ function runConfigCommand(args: string[]): void {
   if (!value) {
     throw new Error("Missing publicBaseUrl value.");
   }
+  if (files.config.server.openaiTunnel && normalizeOptionalPublicBaseUrl(value) !== null) {
+    throw new Error("OpenAI tunnel mode does not use a public URL. Run `devspace init --force` to select Public HTTPS URL.");
+  }
 
   setDevspaceConfigValue(
     ["server", "publicBaseUrl"],
@@ -408,6 +521,9 @@ function printHelp(): void {
       "  devspace init            Create or update ~/.devspace/config.jsonc and auth.json",
       "  devspace doctor          Show config, runtime, and native dependency status",
       "  devspace config get      Print persisted config",
+      "  devspace projects [list|ls]  List allowed project folders",
+      "  devspace projects add <path...>  Allow project folders",
+      "  devspace projects remove|rm <path...>  Remove allowed folders (keeps files)",
       "  devspace config set publicBaseUrl <url|null>",
       "  devspace show-changes <review-ref> [--json]",
       "  devspace agents ls       List subagent sessions",

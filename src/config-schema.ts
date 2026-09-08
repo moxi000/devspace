@@ -11,6 +11,10 @@ const serverConfigSchema = z.object({
   publicBaseUrl: z.string().url().nullable().default(null),
   allowedHosts: z.array(z.string().trim().min(1)).default([]),
   trustProxy: z.boolean().default(false),
+  openaiTunnel: z.object({
+    tunnelId: z.string().regex(/^tunnel_[a-zA-Z0-9_-]+$/),
+    binary: z.string().trim().min(1).default("tunnel-client"),
+  }).strict().nullable().default(null),
 }).strict().prefault({});
 
 const workspacesConfigSchema = z.object({

@@ -52,6 +52,32 @@
         "trustProxy": {
           "default": false,
           "type": "boolean"
+        },
+        "openaiTunnel": {
+          "default": null,
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "tunnelId": {
+                  "type": "string",
+                  "pattern": "^tunnel_[a-zA-Z0-9_-]+$"
+                },
+                "binary": {
+                  "default": "tunnel-client",
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "tunnelId"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false

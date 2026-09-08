@@ -8,11 +8,11 @@ This guide covers ChatGPT and Coding Agents using DevSpace with local projects.
 - npm
 - Git
 - Bash, including Git Bash or WSL on Windows
-- a public HTTPS URL that forwards to the local DevSpace server, only when
-  ChatGPT will connect
+- for ChatGPT: the official OpenAI `tunnel-client` and a tunnel/runtime key, or
+  a public HTTPS URL forwarding to the local DevSpace server
 
-DevSpace does not create the public tunnel for you. ChatGPT users can use
-Cloudflare Tunnel, ngrok, Pinggy, Tailscale Funnel, or their own HTTPS reverse
+The OpenAI option needs no separately configured tunneling service. For public
+HTTPS, use Cloudflare Tunnel, ngrok, Pinggy, Tailscale Funnel, or your own reverse
 proxy.
 
 ## Install And Configure
@@ -75,8 +75,43 @@ manually.
 
 ### Connect ChatGPT
 
-Setup only asks for a public URL if you selected ChatGPT. Start your tunnel or
-reverse proxy first and point it at:
+If you selected ChatGPT, setup offers OpenAI secure MCP tunnel or public HTTPS.
+A Coding Agents-only setup skips this section. Existing installations can run
+`npx @waishnav/devspace init --force` to switch connection methods.
+
+#### OpenAI secure MCP tunnel
+
+1. Download and extract the official [tunnel-client release](https://github.com/openai/tunnel-client/releases)
+   for your platform. DevSpace asks for its executable name or path; it does not
+   install the binary.
+2. Create or select a tunnel in [OpenAI Platform Tunnels](https://platform.openai.com/settings/organization/tunnels).
+   Create a regular [runtime API key](https://platform.openai.com/settings/organization/api-keys)
+   whose principal has Tunnels Read and Use permissions. Do not use an admin key.
+3. Select the OpenAI option during initialization and provide the tunnel ID,
+   binary path, and runtime key. The key is entered as a password and saved in
+   `auth.json`, together with a generated secret for local MCP authentication.
+4. Run `npx @waishnav/devspace serve`. It starts the official client against the
+   local MCP endpoint and stops its own client when the server stops. You retain
+   ownership of the remote tunnel and its credentials.
+5. Enable Developer Mode in ChatGPT settings, create an app with connection type
+   **Tunnel**, select that tunnel, and choose **Authentication: None**. Allow the
+   actions you intend to use according to your workspace's permissions.
+
+No public URL is required. DevSpace listens on loopback and the client injects
+an independent secret into local MCP requests. Embedded tool cards are disabled
+at runtime because this tunnel transports MCP rather than arbitrary web assets;
+the configured coding tools remain available and `ui.enabled` is not rewritten.
+Starting the client is not confirmation that ChatGPT has connected: check tool
+discovery and a real workspace call in your ChatGPT session.
+
+See [OpenAI's secure MCP tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)
+for account access and provisioning. This integration follows the official-client
+approach used by [codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web),
+with DevSpace's existing Streamable HTTP server as the local MCP target.
+
+#### Public HTTPS
+
+Start your tunnel or reverse proxy first and point it at:
 
 ```text
 http://127.0.0.1:7676
@@ -108,8 +143,6 @@ Protocol compatibility is automatic. DevSpace serves MCP 2026-07-28 requests
 directly and handles older 2025-era clients statelessly on the same endpoint;
 there is no client-protocol setting to maintain.
 
-A Coding Agents-only setup skips this section.
-
 ## Start The Server
 
 Run:
@@ -118,7 +151,7 @@ Run:
 npx @waishnav/devspace serve
 ```
 
-If your tunnel URL changes, update the persisted value before starting:
+For public HTTPS, if your tunnel URL changes, update the persisted value before starting:
 
 ```bash
 npx @waishnav/devspace config set publicBaseUrl https://devspace.example.com
@@ -127,8 +160,9 @@ npx @waishnav/devspace serve
 
 ## Approve The Client
 
-When ChatGPT, Claude, or another MCP client connects, DevSpace shows an Owner
-password approval page. Enter the Owner password printed during setup.
+For public HTTPS connections, DevSpace shows an Owner password approval page.
+Enter the Owner password printed during setup. OpenAI tunnel connections use
+the tunnel and local secret instead, so they do not show this OAuth page.
 
 The default config files are:
 
@@ -138,6 +172,33 @@ The default config files are:
 ```
 
 Keep `auth.json` private.
+
+## Manage Project Access
+
+Use the project list to manage allowed folders without rerunning initialization:
+
+```bash
+devspace projects                  # List allowed folders (also: projects ls)
+devspace projects add ~/physicsnemo ~/another-project
+devspace projects rm ~/physicsnemo # Also: projects remove
+```
+
+Paths can be absolute, relative to the current directory, or start with `~`.
+Adding a folder requires an existing directory and resolves symbolic links;
+repeated additions do not create duplicates. Removal accepts the folder path,
+including a folder that no longer exists, and never deletes project files.
+The displayed numbers are for reference; remove by path.
+
+Each allowed folder grants access to its descendants. If a removed project is
+still inside another allowed folder, the command reports that it remains
+accessible. To restrict access to individual projects, remove the broad parent
+entry and add only the intended project folders. Removing every entry leaves
+no allowed project folders.
+
+Changes take effect on the next authenticated MCP request without restarting
+the server. They do not stop commands or subagents that have already started.
+Allowed folders restrict MCP workspace and filesystem access; shell commands
+still run with the local user's authority and are not a filesystem sandbox.
 
 ## Check Your Setup
 

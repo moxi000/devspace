@@ -29,6 +29,8 @@ import { expandHomePath } from "./roots.js";
 
 const devspaceAuthConfigSchema = z.object({
   ownerToken: z.string().optional(),
+  openaiTunnelApiKey: z.string().optional(),
+  openaiTunnelSecret: z.string().optional(),
 }).passthrough();
 
 export type DevspaceUserConfig = DevspaceConfig;

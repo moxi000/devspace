@@ -16,7 +16,7 @@ try {
   assert.equal(defaults.host, "127.0.0.1");
   assert.equal(defaults.port, 7676);
   assert.equal(defaults.publicBaseUrl, "http://127.0.0.1:7676");
-  assert.deepEqual(defaults.allowedRoots, [process.cwd()]);
+  assert.deepEqual(defaults.allowedRoots, []);
   assert.deepEqual(defaults.allowedHosts, ["localhost", "127.0.0.1", "::1"]);
   assert.equal(defaults.toolMode, "codex");
   assert.equal(defaults.uiEnabled, true);
@@ -128,6 +128,30 @@ try {
   );
 } finally {
   rmSync(missingAuthDir, { recursive: true, force: true });
+}
+
+
+const tunnelDir = mkdtempSync(join(tmpdir(), "devspace-tunnel-config-test-"));
+const tunnelEnv = { DEVSPACE_CONFIG_DIR: tunnelDir };
+try {
+  const server = { openaiTunnel: { tunnelId: "tunnel_test" } };
+  writeDevspaceConfig({ configVersion: 1, server }, tunnelEnv);
+  assert.throws(() => loadConfig(tunnelEnv), /DEVSPACE_TUNNEL_API_KEY is required/);
+  writeDevspaceAuth({ openaiTunnelApiKey: "api-key" }, tunnelEnv);
+  assert.throws(() => loadConfig(tunnelEnv), /DEVSPACE_TUNNEL_SECRET is required/);
+  writeDevspaceAuth({ openaiTunnelApiKey: "api-key", openaiTunnelSecret: "local-secret" }, tunnelEnv);
+  const config = loadConfig(tunnelEnv);
+  assert.deepEqual(config.openaiTunnel, {
+    tunnelId: "tunnel_test", binary: "tunnel-client", apiKey: "api-key", secret: "local-secret",
+  });
+  assert.equal(config.uiEnabled, false);
+  assert.equal(loadConfig({ ...tunnelEnv, DEVSPACE_TUNNEL_API_KEY: "override", DEVSPACE_TUNNEL_SECRET: "override-secret" }).openaiTunnel?.secret, "override-secret");
+  writeDevspaceConfig({ configVersion: 1, server: { ...server, host: "0.0.0.0" } }, tunnelEnv);
+  assert.throws(() => loadConfig(tunnelEnv), /loopback/);
+  writeDevspaceConfig({ configVersion: 1, server: { ...server, publicBaseUrl: "https://example.com" } }, tunnelEnv);
+  assert.throws(() => loadConfig(tunnelEnv), /publicBaseUrl to be null/);
+} finally {
+  rmSync(tunnelDir, { recursive: true, force: true });
 }
 
 console.log("config tests passed");
